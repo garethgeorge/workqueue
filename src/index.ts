@@ -89,12 +89,6 @@ export class WorkerPool {
   }
 
   killWorker(workerToKill: Worker) {
-    if (workerToKill.isRunningJob()) {
-      throw new Error(
-        "can not kill a worker while it still has an executing job."
-      );
-    }
-
     workerToKill.kill();
     this.workers = this.workers.filter((worker) => {
       return worker != workerToKill;
@@ -242,7 +236,6 @@ export class Worker {
     let result;
     try {
       this.curJob = job;
-
       job.status = JobStatus.RUNNING;
       result = {
         value: await job.task.run(this),
@@ -253,12 +246,14 @@ export class Worker {
       };
       console.error(e);
     } finally {
-      job.status = JobStatus.DONE;
       this.curJob = null;
+      job.status = JobStatus.DONE;
       // return the results via the callbacks
-      for (const callback of job.callbacks) {
-        callback(result);
-      }
+      setImmediate(() => {
+        for (const callback of job.callbacks) {
+          callback(result);
+        }
+      });
       if (this.debug.enabled) this.debug("finished job: " + job.task.name);
     }
   }
