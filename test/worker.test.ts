@@ -5,7 +5,9 @@ import {
   WorkerPool,
   newLambdaTask,
 } from "../src/index";
+import Debug from "debug";
 import expect from "expect";
+const debug = Debug("worker.test");
 
 describe("worker", () => {
 
@@ -22,7 +24,7 @@ describe("worker", () => {
         ((i) => {
           tasks.push(
             newLambdaTask("testTask" + i, async (worker) => {
-              console.log("RUNNING TASK! " + i);
+              debug("RUNNING TASK! " + i);
               runningTasks++;
               numTasksRun++;
               expect(runningTasks).toBeLessThan(numWorkers + 1);
@@ -31,7 +33,7 @@ describe("worker", () => {
                   expect(runningTasks).toBeLessThan(numWorkers + 1);
                   runningTasks--;
                   accept(true);
-                }, 10);
+                }, Math.random() * 10 + 10);
               });
               return true;
             })
@@ -39,9 +41,9 @@ describe("worker", () => {
         })(i);
       }
 
-      console.log("ROOT TASK IS WAITING FOR RESULTS");
+      debug("ROOT TASK IS WAITING FOR RESULTS");
       await worker.awaitResults(tasks);
-      console.log("ROOT TASK IS DONE WOOT WOOT!");
+      debug("ROOT TASK IS DONE WOOT WOOT!");
     });
 
     await workerPool.execute(rootTask);
@@ -54,5 +56,8 @@ describe("worker", () => {
   });
   it("should be able to queue up jobs with two workers", async () => {
     await poolTestHelper(2);
+  });
+  it("should be able to queue up jobs with four workers", async () => {
+    await poolTestHelper(4);
   });
 });
