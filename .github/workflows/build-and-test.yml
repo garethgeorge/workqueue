@@ -1,4 +1,4 @@
-name: sync_chrome_ext
+name: workqueue
 on: push
 jobs:
   run_tests:
