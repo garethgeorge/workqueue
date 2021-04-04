@@ -57,6 +57,8 @@ describe("worker", () => {
   ) => {
     const workerPool = new WorkerPool(numWorkers);
 
+    let tasksRun = 0;
+
     const taskGen = (treeLevel: number, taskNo: number) => {
       return newLambdaTask(
         "taskDepth: " + treeDepth + " taskNo: " + taskNo,
@@ -65,19 +67,24 @@ describe("worker", () => {
             await new Promise((accept) => {
               setTimeout(accept, Math.random() * 10);
             });
-            return true;
+            tasksRun++;
+            return 1;
           } else {
-            let tasks: Task<boolean>[] = [];
+            let tasks: Task<number>[] = [];
             for (let i = 0; i < branchingFactor; ++i) {
               tasks.push(taskGen(treeLevel + 1, i));
             }
-            await worker.awaitResults(tasks);
+            const results = await worker.awaitResults(tasks);
+            return results.reduce((prev, next) => {
+              return prev + next.value;
+            }, 0);
           }
         }
       );
     };
 
-    await workerPool.execute(taskGen(0, 0));
+    const result = await workerPool.execute(taskGen(0, 0));
+    expect(result.value).toBe(Math.pow(branchingFactor, treeDepth));
   };
 
   it("should be able to queue up jobs with one worker", async () => {
