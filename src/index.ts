@@ -4,18 +4,33 @@ import Semaphore from "./lib/semaphore";
 import EventEmitter from "eventemitter3";
 import debug from "debug";
 
+/**
+ * An individual unit of work
+ */
 export interface Task<T> {
   id: string;
   name: string; // must be a unique string
   run: (worker: Worker) => Promise<T>;
 }
 
+/**
+ * The result of executing a task
+ */
 export interface TaskResult<T> {
   error?: Error;
   value?: T;
 }
 
-export const newLambdaTask = <T>(name: string, func: (worker: Worker) => Promise<T>) => {
+/**
+ * Utility function to create a task with a given name from an anonymous asynchronous function.
+ * @param name name for the generated task
+ * @param func asynchronous function to execute
+ * @returns a newly constructed task with the specified name and function
+ */
+export const newLambdaTask = <T>(
+  name: string,
+  func: (worker: Worker) => Promise<T>
+) => {
   return {
     id: crypto.randomBytes(8).toString("hex"),
     name: name,
@@ -23,17 +38,27 @@ export const newLambdaTask = <T>(name: string, func: (worker: Worker) => Promise
   } as Task<T>;
 };
 
-interface WorkerJob {
-  task: Task<any>;
-  children: Task<any>[];
-  status: "pending" | "executing" | "blocked" | "done";
-  callbacks: ((result: TaskResult<any>) => void)[];
-  blocked: boolean;
-  priority: number;
+enum JobStatus {
+  PENDING = "pending",
+  RUNNING = "running",
+  DONE = "done",
 }
 
 /**
- * TODO: implement garbage collection of completed worker jobs
+ * Wrapper of a task that includes its metadata and execution status
+ */
+interface WorkerJob {
+  task: Task<any>;
+  children: Task<any>[];
+  callbacks: ((result: TaskResult<any>) => void)[];
+  priority: number;
+  status: JobStatus;
+  blocked: boolean;
+}
+
+/**
+ * !TODO: implement garbage collection of completed worker jobs that enter 'done' state.
+ *  NOTE: job lifecycle management should be extensible.
  */
 let nextPoolId = 0;
 export class WorkerPool {
@@ -57,14 +82,33 @@ export class WorkerPool {
     return this._id;
   }
 
+  spawnWorker() {
+    const newWorker = new Worker(this);
+    this.workers.push(newWorker);
+    return newWorker;
+  }
+
+  killWorker(workerToKill: Worker) {
+    if (workerToKill.isRunningJob()) {
+      throw new Error(
+        "can not kill a worker while it still has an executing job."
+      );
+    }
+
+    workerToKill.kill();
+    this.workers = this.workers.filter((worker) => {
+      return worker != workerToKill;
+    });
+  }
+
   async execute<T>(rootTask: Task<T>) {
     const newRootJob: WorkerJob = {
       task: rootTask,
       priority: 0,
       children: [],
-      status: "pending",
-      callbacks: [],
+      status: JobStatus.PENDING,
       blocked: false,
+      callbacks: [],
     };
     this.workerJobs[newRootJob.task.id] = newRootJob;
     this.queues[0].enqueue(newRootJob);
@@ -82,10 +126,9 @@ export class WorkerPool {
     this.debug("pool has detected that the root task exited.");
 
     // signal to kill the workers when the root task completes
-    this.debug("availableJobs is " + this.availableJobs.value() + ", signaling until all workers are unblocked.");
-    while (this.availableJobs.value() <= 0) {
-      // wake up the workers but no tasks will be available triggering them to exit
-      this.availableJobs.V(); 
+    for (const worker of this.workers) {
+      this.debug("killing worker: " + worker.id);
+      this.killWorker(worker); // NOTE: O(n) making this loop O(n^2)
     }
 
     this.debug("waiting for all workers to exit.");
@@ -100,32 +143,43 @@ export class WorkerPool {
     if (!parentJob) {
       throw new Error("no such parent task: " + parentTask.id);
     }
+
+    // setup a job for the task which tracks its execution status and priority etc.
     const newJob: WorkerJob = {
       task,
       priority: this.workerJobs[parentTask.id].priority + 1,
       children: [],
-      status: "pending",
-      callbacks: [],
+      status: JobStatus.PENDING,
       blocked: false,
+      callbacks: [],
     };
     parentJob.children.push(task);
-
-    // add new queues until there is a slot for it
-    while (this.queues.length <= newJob.priority) {
-      this.queues.push(new Queue());
-    }
-
-    this.queues[newJob.priority].enqueue(newJob);
     this.workerJobs[task.id] = newJob;
 
-    // increment the number of available jobs
-    this.debug(`enqueued new job: (id: ${task.id}) ${task.name}`);
-    this.availableJobs.V();
-
+    // enqueue the newly created job
+    this.enqueueJob(newJob);
+    if (this.debug.enabled)
+      this.debug(`enqueued new job: (id: ${task.id}) ${task.name}`);
     return newJob;
   }
 
-  getJobForTask(parentTask: Task<any>, task: Task<any>): WorkerJob {
+  enqueueJob(job: WorkerJob) {
+    // add new queues until there is a slot for it
+    while (this.queues.length <= job.priority) {
+      this.queues.push(new Queue());
+    }
+    // add to the queue corresponding to the jobs priority (which must now exist)
+    this.queues[job.priority].enqueue(job);
+    this.availableJobs.V();
+  }
+
+  /**
+   * Either returns metadata for a given task or enqueues it as a child of 'parentTask' if it does not exist.
+   * @param parentTask the task to make the parent task if no job is found for 'task'
+   * @param task the task we want to find job metadata for or enqueue if it does not exist
+   * @returns job metadata associated with the provided task
+   */
+  getOrMakeJobForTask(parentTask: Task<any>, task: Task<any>): WorkerJob {
     let job = this.workerJobs[task.id];
     if (job) {
       return job;
@@ -135,7 +189,7 @@ export class WorkerPool {
 
   async getNextJob() {
     await this.availableJobs.P();
-    
+
     let queue = this.queues[this.queues.length - 1];
     while (queue.size() === 0 && this.queues.length > 1) {
       this.queues.pop();
@@ -145,7 +199,7 @@ export class WorkerPool {
     return queue.dequeue();
   }
 
-  getNumWorkers() {
+  get numWorkers() {
     return this.workers.length;
   }
 }
@@ -158,88 +212,180 @@ export class Worker {
     worker maintains a stack of jobs, only one job in the stack should ever be unblocked
   */
 
+  // worker info
   private _id: number;
   private pool: WorkerPool;
-  private workSemaphore: Semaphore = new Semaphore(1);
-  private curJob: WorkerJob | null = null;
   private debug: debug.Debugger;
+
+  // execution status variables
+  private curJob: WorkerJob | null = null; // should only ever be set by runJob
+  private started: boolean = false; // has this worker been run yet, once set true should never be set back to false
+  private killed: boolean = false; // has the worker been killed, once set to true should never be set back to false
+  private onKilled: (() => void) | null; // used to cancel getNextJobOrDeath
 
   constructor(pool: WorkerPool) {
     this.pool = pool;
-    this._id = this.pool.getNumWorkers();
-    this.debug = debug("workqueue:" + this.pool.id + this.id);
+    this._id = this.pool.numWorkers;
+    this.debug = debug("workqueue:" + this.pool.id + "-" + this.id);
   }
 
   get id() {
     return this._id;
   }
 
-  async runJob(job: WorkerJob) {
-    // run the task
+  /**
+   * Runs a specific job on this worker.
+   * @param job the job to execute
+   */
+  private async runJob(job: WorkerJob) {
+    if (this.debug.enabled) this.debug("started job: " + job.task.name);
     let result;
     try {
-      // acquire the work semaphore / right to execute
-      await this.workSemaphore.P();
       this.curJob = job;
 
-      job.status = "executing";
+      job.status = JobStatus.RUNNING;
       result = {
-        value: await job.task.run(this)
-      }
+        value: await job.task.run(this),
+      };
     } catch (e) {
       result = {
-        error: e
+        error: e,
       };
+      console.error(e);
     } finally {
-      job.status = "done";
+      job.status = JobStatus.DONE;
       this.curJob = null;
-      this.workSemaphore.V();
-    }
-
-    // return the results via the callbacks
-    for (const callback of job.callbacks) {
-      callback(result);
+      // return the results via the callbacks
+      for (const callback of job.callbacks) {
+        callback(result);
+      }
+      if (this.debug.enabled) this.debug("finished job: " + job.task.name);
     }
   }
 
+  /**
+   * Wait for the provided tasks to finish and returns their results.
+   * @param tasks list of tasks to block the worker on
+   * @returns list of taskresults in the order of the tasks waited on.
+   */
   async awaitResults<T>(tasks: Task<T>[]): Promise<TaskResult<T>[]> {
-    const curJob = this.curJob;
-    curJob.status = "blocked";
-    this.curJob = null; 
+    this.curJob.blocked = true;
 
-    // release the work semaphore 
-    setImmediate(() => {
-      this.workSemaphore.V();
-    });
+    // spawn an additional worker to this one's place while it is blocked.
+    this.debug(
+      "awaitResults spawning an extra worker to maintain currency. This worker will be blocked shortly."
+    );
+    const tmpWorker = this.pool.spawnWorker();
+    const tmpWorkerRunPromise = tmpWorker.run();
 
     // wait on the results via callbacks
     const promises = tasks.map((task) => {
-      const job = this.pool.getJobForTask(curJob.task, task);
+      const job = this.pool.getOrMakeJobForTask(this.curJob.task, task);
       return new Promise((accept, reject) => {
-        job.callbacks.push(accept);
+        job.callbacks.push((value) => {
+          this.debug("task " + task.name + " reported results.");
+          accept(value);
+        });
       });
     });
 
-    console.log("running awaitResults on " + tasks.length + " tasks.");
+    this.debug("running awaitResults on " + tasks.length + " tasks.");
     const results = (await Promise.all(promises)) as TaskResult<T>[];
-    console.log("unblocked awaitTasks, job completed.");
+    this.debug(
+      "unblocked awaitTasks, killing temp worker and awaiting tmp worker run loop exit."
+    );
+    this.pool.killWorker(tmpWorker);
+    await tmpWorkerRunPromise;
+    this.debug(
+      "awaitResults returning. All results are available and tmp worker has exited."
+    );
 
-    // reacquire the work semaphore 
-    await this.workSemaphore.P();
     return results;
   }
 
+  /**
+   * Gets next job or returns null if killed before a job becomes avialable
+   */
+  private getNextJobOrDeath(): Promise<WorkerJob | null> {
+    return new Promise((accept, reject) => {
+      let diedFirst = false;
+
+      this.pool
+        .getNextJob()
+        .then((job) => {
+          this.onKilled = null;
+          if (diedFirst) {
+            this.debug.log("died first, reenqueueing job");
+            this.pool.enqueueJob(job);
+            return;
+          }
+          accept(job);
+        })
+        .catch(reject);
+
+      this.onKilled = () => {
+        diedFirst = true;
+        accept(null);
+      };
+    });
+  }
+
   async run() {
-    while (true) {
-      this.debug("worker " + this.id + " running, waiting for the next job.");
-      const job = await this.pool.getNextJob();
-      this.debug("worker " + this.id + " running, got inside getNextJob critical section.");
+    if (this.started) {
+      throw new Error("worker has already been started elsewhere");
+    }
+    this.started = true;
+
+    while (!this.killed) {
+      this.debug("worker " + this.id + " waiting for the next job.");
+      const job = await this.getNextJobOrDeath();
       if (!job) {
-        this.debug("worker " + this.id + " exiting -- queue provided null job indicating end.");
+        if (this.debug.enabled)
+          this.debug(
+            "worker " +
+              this.id +
+              " exiting -- queue provided null job indicating worker killed or queue exhausted"
+          );
         break;
       }
-      this.debug("worker " + this.id + " pulled job from queue... task name: " + job.task.name);
-      await this.runJob(job); 
+      if (this.debug.enabled)
+        this.debug(
+          "worker " +
+            this.id +
+            " pulled job from queue... task name: " +
+            job.task.name
+        );
+      await this.runJob(job);
+      if (this.debug.enabled)
+        this.debug("worker " + this.id + " finished job: " + job.task.name);
     }
+  }
+
+  /**
+   * @internal
+   * signals to the worker that it should exit. NEVER CALL DIRECTLY, USE pool.killWorker(worker)
+   */
+  kill() {
+    this.debug("received kill signal.");
+    this.killed = true;
+    if (this.onKilled) {
+      setImmediate(this.onKilled.bind(this));
+    }
+  }
+
+  /**
+   * False if the worker has been killed
+   * @returns true if the worker has not yet been killed
+   */
+  isAlive() {
+    return !this.killed;
+  }
+
+  isBlocked() {
+    return this.curJob && this.curJob.blocked;
+  }
+
+  isRunningJob() {
+    return this.curJob != null;
   }
 }

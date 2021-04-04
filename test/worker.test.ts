@@ -19,22 +19,24 @@ describe("worker", () => {
     const rootTask = newLambdaTask("rootTask", async (worker) => {
       const tasks: Task<boolean>[] = [];
       for (let i = 0; i < 10; ++i) {
-        tasks.push(
-          newLambdaTask("testTask", async (worker) => {
-            console.log("RUNNING TASK!");
-            runningTasks++;
-            numTasksRun++;
-            expect(runningTasks).toBe(1);
-            await new Promise((accept) => {
-              setTimeout(() => {
-                expect(runningTasks).toBe(1);
-                runningTasks--;
-                accept(true);
-              }, 10);
-            });
-            return true;
-          })
-        );
+        ((i) => {
+          tasks.push(
+            newLambdaTask("testTask" + i, async (worker) => {
+              console.log("RUNNING TASK! " + i);
+              runningTasks++;
+              numTasksRun++;
+              expect(runningTasks).toBeLessThan(numWorkers + 1);
+              await new Promise((accept, reject) => {
+                setTimeout(() => {
+                  expect(runningTasks).toBeLessThan(numWorkers + 1);
+                  runningTasks--;
+                  accept(true);
+                }, 10);
+              });
+              return true;
+            })
+          );
+        })(i);
       }
 
       console.log("ROOT TASK IS WAITING FOR RESULTS");
@@ -47,10 +49,10 @@ describe("worker", () => {
     expect(numTasksRun).toEqual(10);
   }
 
-  it("should be able to queue up jobs with two workers", async () => {
-    await poolTestHelper(2);
-  });
   it("should be able to queue up jobs with one worker", async () => {
     await poolTestHelper(1);
+  });
+  it("should be able to queue up jobs with two workers", async () => {
+    await poolTestHelper(2);
   });
 });

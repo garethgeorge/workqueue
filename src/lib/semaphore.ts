@@ -26,7 +26,7 @@ export default class Semaphore {
   V() {
     this.count++;
     if (this.count <= 0) {
-      this.awaiters.dequeue()();
+      setImmediate(this.awaiters.dequeue());
     }
   }
 

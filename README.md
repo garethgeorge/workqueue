@@ -10,3 +10,6 @@ const pool = new WorkQueue(newLambdaTask(async (worker) => {
   // step 3: evaluate the results and return
 }));
 ```
+
+# TODO
+ - split out lib/queue and lib/semaphore into a separate package for synchronization
