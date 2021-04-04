@@ -49,6 +49,14 @@ describe("worker", () => {
     await workerPool.execute(rootTask);
 
     expect(numTasksRun).toEqual(10);
+  };
+
+  const awaitTreeHelper = async (numWorker: number, treeDepth: number, branchingFactor: number) => {
+
+    const taskGen = () => {
+      
+    }
+
   }
 
   it("should be able to queue up jobs with one worker", async () => {
@@ -59,5 +67,9 @@ describe("worker", () => {
   });
   it("should be able to queue up jobs with four workers", async () => {
     await poolTestHelper(4);
+  });
+
+  it("should be able to create a tree of awaited tasks", async () => {
+
   });
 });
