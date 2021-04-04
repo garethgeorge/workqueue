@@ -1,6 +1,5 @@
 import crypto from "crypto";
-import Queue from "./lib/queue";
-import Semaphore from "./lib/semaphore";
+import {Queue, AsyncQueue, Semaphore} from "synchronization-js";
 import EventEmitter from "eventemitter3";
 import debug from "debug";
 
@@ -38,7 +37,7 @@ export const newLambdaTask = <T>(
   } as Task<T>;
 };
 
-enum JobStatus {
+export enum JobStatus {
   PENDING = "pending",
   RUNNING = "running",
   DONE = "done",
@@ -47,7 +46,7 @@ enum JobStatus {
 /**
  * Wrapper of a task that includes its metadata and execution status
  */
-interface WorkerJob {
+export interface WorkerJob {
   task: Task<any>;
   children: Task<any>[];
   callbacks: ((result: TaskResult<any>) => void)[];

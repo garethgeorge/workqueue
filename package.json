@@ -1,5 +1,5 @@
 {
-  "name": "uiworkqueue",
+  "name": "worktree",
   "version": "1.0.0",
   "description": "",
   "main": "dist/src/index.js",
@@ -25,8 +25,9 @@
     "@types/mocha": "^8.0.3",
     "gulp": "^4.0.2",
     "mocha": "^8.1.3",
-    "typescript": "^4.0.2",
-    "ts-node": "^9.0.0"
+    "synchronization-js": "^1.0.3",
+    "ts-node": "^9.0.0",
+    "typescript": "^4.0.2"
   },
   "mocha": {
     "package": "./package.json",
