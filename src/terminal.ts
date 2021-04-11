@@ -1,13 +1,5 @@
-import {
-  JobStatus,
-  newLambdaTask,
-  Task,
-  Worker,
-  WorkerJob,
-  WorkerPool,
-} from "./worker";
+import { JobStatus, Worker, WorkerJob, WorkerPool } from "./worker";
 import blessed from "blessed";
-import { MemoryLoggerFactory } from "./logger";
 
 const debounce = function (
   debounceMs: number,
@@ -27,7 +19,29 @@ const debounce = function (
   };
 };
 
-class WorkQueueVisualizer {
+const jobToListItem = (job: WorkerJob): string => {
+  let jobInfo = `[${job.task.id}] ${job.task.name}`;
+  if (job.logger && job.logger.getProgress() != null) {
+    jobInfo += " - %" + Math.round(job.logger.getProgress() * 10) / 10;
+  }
+  jobInfo = blessed.escape(jobInfo);
+
+  switch (job.status) {
+    case JobStatus.RUNNING:
+      if (job.blocked) {
+        return `{yellow-fg}${jobInfo}{/yellow-fg}`;
+      } else {
+        return `{cyan-fg}${jobInfo}{/cyan-fg}`;
+      }
+    case JobStatus.PENDING:
+      return `{grey-fg}${jobInfo}{/grey-fg}`;
+    case JobStatus.DONE:
+      return `{green-fg}${jobInfo}{/green-fg}`;
+  }
+  return "ERROR INVALID JOB STATUS";
+};
+
+export default class WorkQueueVisualizer {
   private pool: WorkerPool;
 
   private screen = blessed.screen({
@@ -41,9 +55,9 @@ class WorkQueueVisualizer {
     },
   });
 
-  private queueList = blessed.list({
+  private queueList = blessed.box({
     parent: this.screen,
-    label: "Queue",
+    label: "Task Queue",
     top: 0,
     left: 0,
     width: "50%",
@@ -61,7 +75,15 @@ class WorkQueueVisualizer {
     alwaysScroll: true,
   });
 
-  private workerVisualizers: { [id: string]: WorkerVisualizer } = {};
+  private logBox = blessed.layout({
+    parent: this.screen,
+    label: "Worker Logs",
+    top: 0,
+    right: 0,
+    width: "50%",
+    height: "100%",
+    layout: "inline-block",
+  });
 
   constructor(pool: WorkerPool, refreshInterval: number) {
     this.pool = pool;
@@ -81,7 +103,14 @@ class WorkQueueVisualizer {
     this.pool.onDequeueJob.listen(debouncedRefresh);
     this.pool.onEnqueueJob.listen(debouncedRefresh);
     this.pool.onRemoveJob.listen(debouncedRefresh);
-    this.pool.onSpawnWorker.listen(debouncedRefresh);
+    this.pool.onSpawnWorker.listen((worker) => {
+      debouncedRefresh();
+      worker.onRunJob.listen((workerJob) => {
+        if (workerJob.logger) {
+          new JobLogVisualizer(this.logBox, workerJob);
+        }
+      });
+    });
     this.pool.onKillWorker.listen(debouncedRefresh);
   }
 
@@ -89,27 +118,7 @@ class WorkQueueVisualizer {
     try {
       this.pool.getRootJob();
 
-      const jobToListItem = (job: WorkerJob): string => {
-        let jobInfo = `[${job.task.id}] ${job.task.name}`;
-        if (job.logger && job.logger.getProgress() != null) {
-          jobInfo += " - %" + Math.round(job.logger.getProgress() * 10) / 10;
-        }
-
-        switch (job.status) {
-          case JobStatus.RUNNING:
-            if (job.blocked) {
-              return `{yellow-fg}${jobInfo}{/yellow-fg}`;
-            } else {
-              return `{cyan-fg}${jobInfo}{/cyan-fg}`;
-            }
-          case JobStatus.PENDING:
-            return `{grey-fg}${jobInfo}{/grey-fg}`;
-          case JobStatus.DONE:
-            return `{green-fg}${jobInfo}{/green-fg}`;
-        }
-        return "ERROR INVALID JOB STATUS";
-      };
-      const listItems: string[] = ["" + Math.random()];
+      const listItems: string[] = [];
 
       // RENDER JOBS FROM THE TREE
       if (this.pool.getRootJob()) {
@@ -145,12 +154,12 @@ class WorkQueueVisualizer {
       });
       */
 
-      if (this.queueList.getScroll() >= listItems.length) {
-        this.queueList.setScroll(listItems.length - 1);
-      }
+      // if (this.queueList.getScroll() >= listItems.length) {
+      //   this.queueList.setScroll(listItems.length - 1);
+      // }
 
-      this.queueList.setItems(listItems as any[]);
-      this.queueList.screen.render();
+      this.queueList.setContent(listItems.join("\n"));
+      this.screen.render();
     } catch (e) {
       this.screen.destroy();
       console.error(e);
@@ -158,76 +167,50 @@ class WorkQueueVisualizer {
   }
 }
 
-class WorkerVisualizer {
-  private worker: Worker;
+class JobLogVisualizer {
+  private job: WorkerJob;
   private box: blessed.Widgets.BoxElement;
-  constructor(worker: Worker, parent: blessed.Widgets.Node) {
-    this.worker = worker;
+  private onUpdateListener: () => void;
+
+  constructor(parent: blessed.Widgets.Node, job: WorkerJob) {
+    let heightLines = 10;
+    this.job = job;
     this.box = blessed.box({
-      parent: parent,
-      content: "Hello world",
+      label: jobToListItem(job),
+      tags: true,
+      top: 0,
+      right: 0,
+      width: "100%",
+      height: "10%",
       border: "line",
     });
-  }
+    parent.prepend(this.box);
 
-  getWorker() {
-    return this.worker;
-  }
+    this.onUpdateListener = job.onUpdate.listen(() => {
+      this.box.setLabel(jobToListItem(job));
+      this.box.render();
+    });
 
-  render(xoffset: string, yoffset: string, width: string, height: string) {
-    this.box.left = xoffset;
-    this.box.top = yoffset;
-    this.box.width = width;
-    this.box.height = height;
+    const onComplete = () => {
+      setTimeout(() => {
+        this.destroy();
+      }, 500);
+    };
+
+    job.onResult.listen(onComplete);
+    job.onError.listen(onComplete);
+
+    job.logger.readableStream().on("data", (data) => {
+      let content = this.box.getText().split("\n");
+      if (content.length > heightLines * 2) {
+        content = content.slice(0, heightLines * 2);
+      }
+      this.box.setText(data + "\n" + content.join("\n"));
+    });
   }
 
   destroy() {
     this.box.destroy();
+    this.job.onUpdate.removeListener(this.onUpdateListener);
   }
 }
-
-const awaitTreeHelper = async (
-  workerPool: WorkerPool,
-  treeDepth: number,
-  branchingFactor: number
-) => {
-  let tasksRun = 0;
-
-  const taskGen = (treeLevel: number, taskNo: number) => {
-    return newLambdaTask(
-      "taskDepth: " + treeLevel + " taskNo: " + taskNo,
-      async (worker, logger) => {
-        if (treeLevel === treeDepth) {
-          logger.setProgress(0);
-          while (logger.getProgress() < 100) {
-            logger.setProgress(logger.getProgress() + 10);
-            await new Promise((accept, reject) => {
-              setTimeout(accept, Math.random() * 100);
-            });
-          }
-          tasksRun++;
-          return 1;
-        } else {
-          await new Promise((accept) => {
-            setTimeout(accept, 200);
-          });
-          let tasks: Task<number>[] = [];
-          for (let i = 0; i < branchingFactor; ++i) {
-            tasks.push(taskGen(treeLevel + 1, i));
-          }
-          const results = await worker.awaitResults(tasks, logger);
-          return results.reduce((prev, next) => {
-            return prev + next;
-          }, 0);
-        }
-      }
-    );
-  };
-
-  const result = await workerPool.execute(taskGen(0, 0));
-  console.log(result);
-};
-
-const workerPool = new WorkerPool(4, new MemoryLoggerFactory());
-new WorkQueueVisualizer(workerPool, 100);
-awaitTreeHelper(workerPool, 16, 2);

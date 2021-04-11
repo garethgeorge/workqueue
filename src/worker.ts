@@ -40,11 +40,12 @@ export enum JobStatus {
 /**
  * Wrapper of a task that includes its metadata and execution status
  */
-export interface WorkerJob {
+export class WorkerJob {
   task: Task<any>;
   children: Task<any>[];
-  callbacks: ((result: any) => void)[];
-  errorCallbacks: ((error: Error) => void)[];
+  onResult: EventEmitter<any>;
+  onError: EventEmitter<Error>;
+  onUpdate: EventEmitter<void>; // status change or blocked
   priority: number;
   status: JobStatus;
   blocked: boolean;
@@ -129,8 +130,9 @@ export class WorkerPool {
       children: [],
       status: JobStatus.PENDING,
       blocked: false,
-      callbacks: [],
-      errorCallbacks: [],
+      onResult: new EventEmitter(),
+      onError: new EventEmitter(),
+      onUpdate: new EventEmitter(),
       logger: null,
     };
     this.rootJob = newRootJob;
@@ -146,8 +148,8 @@ export class WorkerPool {
     try {
       this.debug("pool.execute awaiting result of root task");
       return await new Promise((accept, reject) => {
-        newRootJob.callbacks.push(accept);
-        newRootJob.errorCallbacks.push(reject);
+        newRootJob.onResult.listen(accept);
+        newRootJob.onError.listen(reject);
       });
     } finally {
       this.debug("pool has detected that the root task exited.");
@@ -195,8 +197,9 @@ export class WorkerPool {
       children: [],
       status: JobStatus.PENDING,
       blocked: false,
-      callbacks: [],
-      errorCallbacks: [],
+      onError: new EventEmitter(),
+      onResult: new EventEmitter(),
+      onUpdate: new EventEmitter(),
       logger: null,
     };
     parentJob.children.push(task);
@@ -293,6 +296,8 @@ export class Worker {
   private started: boolean = false; // has this worker been run yet, once set true should never be set back to false
   private killed: boolean = false; // has the worker been killed, once set to true should never be set back to false
 
+  public onRunJob = new EventEmitter<WorkerJob>();
+
   constructor(pool: WorkerPool, loggerFactory: LoggerFactory) {
     this.pool = pool;
     this._id = this.pool.numWorkers;
@@ -318,25 +323,25 @@ export class Worker {
       this.curJob = job;
       job.logger = this.loggerFactory.createLogger(job.task);
       job.status = JobStatus.RUNNING;
+      job.onUpdate.emit();
+      this.onRunJob.emit(job);
       let result = await job.task.run(this, job.logger);
       // return the results via the callbacks
       setImmediate(() => {
-        for (const callback of job.callbacks) {
-          callback(result);
-        }
+        job.onResult.emit(result);
       });
       return result;
     } catch (e) {
       console.log("CAUGHT AN ERROR: ", e);
       setImmediate(() => {
-        for (const callback of job.errorCallbacks) {
-          callback(e);
-        }
+        job.logger.writableStream().write("" + e);
+        job.onError.emit(e);
       });
     } finally {
       this.pool.removeTask(job.task);
       this.curJob = null;
       job.status = JobStatus.DONE;
+      job.onUpdate.emit();
 
       if (this.debug.enabled) this.debug("finished job: " + job.task.name);
     }
@@ -352,6 +357,7 @@ export class Worker {
     logger: Logger | null = null
   ): Promise<T[]> {
     this.curJob.blocked = true;
+    this.curJob.onUpdate.emit();
     if (logger) {
       logger.setProgress(0);
     }
@@ -386,14 +392,14 @@ export class Worker {
             };
           }
           if (logger) {
-            job.callbacks.push((value) => {
+            job.onResult.listen((value) => {
               logger.setProgress(
                 Math.min(100, logger.getProgress() + 100 / tasks.length)
               );
               accept(value);
             });
-          } else job.callbacks.push(accept);
-          job.errorCallbacks.push(reject);
+          } else job.onResult.listen(accept);
+          job.onError.listen(reject);
         });
       });
 
@@ -408,6 +414,7 @@ export class Worker {
       );
       await this.pool.killWorker();
       this.curJob.blocked = false;
+      this.curJob.onUpdate.emit();
       this.debug(
         "awaitResults returning. All results are available and tmp worker has exited."
       );

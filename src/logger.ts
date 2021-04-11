@@ -17,8 +17,9 @@ export interface Logger {
    * @returns completion percentage 0-100.
    */
   getProgress(): number;
-  writeStdout(error: string): void;
-  writeStderr(message: string): void;
+
+  writableStream(): stream.Writable;
+  readableStream(): stream.Readable;
 }
 
 export interface LoggerFactory {
@@ -30,7 +31,7 @@ export interface LoggerFactory {
 // TODO: split out a separate StreamLogger interface or something of that sort...
 export class MemoryLogger implements Logger {
   private progress: number = 0;
-  private stream = (new StreamCache() as undefined) as stream.Duplex;
+  private logger = new stream.PassThrough();
 
   setProgress(progress: number) {
     this.progress = progress;
@@ -40,16 +41,12 @@ export class MemoryLogger implements Logger {
     return this.progress;
   }
 
-  writeStdout(message: string) {
-    this.stream.write(message);
+  writableStream() {
+    return this.logger;
   }
 
-  writeStderr(message: string) {
-    this.stream.write(message);
-  }
-
-  getStream() {
-    return this.stream as stream.Readable;
+  readableStream() {
+    return this.logger;
   }
 }
 
