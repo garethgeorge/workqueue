@@ -1,7 +1,7 @@
 export default class EventEmitter<T> {
-  private listeners: ((event: T) => any)[]= [];
-  
-  on(listener: (event: T) => any) {
+  private listeners: ((event: T) => any)[] = [];
+
+  listen(listener: (event: T) => any) {
     this.listeners.push(listener);
   }
 

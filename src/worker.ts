@@ -72,6 +72,7 @@ export class WorkerPool {
   public onRemoveJob = new EventEmitter<WorkerJob>(); // job completed
   public onSpawnWorker = new EventEmitter<Worker>(); // worker started
   public onKillWorker = new EventEmitter<Worker>(); // worker killed but not necessarily dead yet.
+  public onDone = new EventEmitter<void>(); // worker done.
 
   constructor(numWorkers: number, loggerFactory: LoggerFactory) {
     this.loggerFactory = loggerFactory;
@@ -158,6 +159,7 @@ export class WorkerPool {
       }
 
       this.executeExclusion.V();
+      this.onDone.emit();
     }
   }
 
