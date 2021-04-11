@@ -132,8 +132,9 @@ export class WorkerPool {
 
     try {
       this.debug("pool.execute awaiting result of root task");
-      return await new Promise((accept) => {
+      return await new Promise((accept, reject) => {
         newRootJob.callbacks.push(accept);
+        newRootJob.errorCallbacks.push(reject);
       });
     } finally {
       this.debug("pool has detected that the root task exited.");
@@ -237,8 +238,8 @@ export class WorkerPool {
    */
   getQueuedJobs() {
     const jobs: WorkerJob[] = [];
-    for (const queue of this.queues.reverse()) {
-      jobs.push.apply(jobs, queue.toArray());
+    for (let i = this.queues.length - 1; i >= 0; --i) {
+      jobs.push.apply(jobs, this.queues[i].toArray());
     }
     return jobs;
   }
@@ -286,6 +287,10 @@ export class Worker {
    */
   private async runJob(job: WorkerJob) {
     if (this.debug.enabled) this.debug("started job: " + job.task.name);
+    await new Promise((accept) => {
+      setImmediate(accept);
+    });
+
     try {
       this.curJob = job;
       job.logger = this.loggerFactory.createLogger(job.task);
@@ -299,6 +304,7 @@ export class Worker {
       });
       return result;
     } catch (e) {
+      console.log("CAUGHT AN ERROR: ", e);
       setImmediate(() => {
         for (const callback of job.errorCallbacks) {
           callback(e);
@@ -358,12 +364,15 @@ export class Worker {
 
       this.debug("running awaitResults on " + tasks.length + " tasks.");
       return (await Promise.all(promises)) as T[];
+    } catch (e) {
+      console.log("CAUGHT AN EXCEPTION: " + e);
     } finally {
       this.debug(
         "unblocked awaitTasks, killing temp worker and awaiting tmp worker run loop exit."
       );
       this.pool.killWorker(tmpWorker);
       await tmpWorkerRunPromise;
+      this.curJob.blocked = false;
       this.debug(
         "awaitResults returning. All results are available and tmp worker has exited."
       );
@@ -381,8 +390,8 @@ export class Worker {
         .getNextJob()
         .then((job) => {
           this.onKilled = null;
-          if (diedFirst) {
-            this.debug.log("died first, reenqueueing job");
+          if (diedFirst || this.killed) {
+            this.debug("died first, reenqueueing job");
             this.pool.enqueueJob(job);
             return;
           }
@@ -391,6 +400,7 @@ export class Worker {
         .catch(reject);
 
       this.onKilled = () => {
+        this.debug("killed by kill signal");
         diedFirst = true;
         accept(null);
       };
@@ -436,7 +446,7 @@ export class Worker {
     this.debug("received kill signal.");
     this.killed = true;
     if (this.onKilled) {
-      setImmediate(this.onKilled.bind(this));
+      this.onKilled();
     }
   }
 

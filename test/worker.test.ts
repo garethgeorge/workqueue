@@ -101,10 +101,27 @@ describe("work pool", () => {
     await awaitTreeHelper(workerPool, 4, 2);
   });
 
-  it("should be able to create a really big and complicated tree with many workers", async () => {
+  it.only("should be able to create a really big and complicated tree with many workers", async () => {
     const workerPool = new WorkerPool(10, new MemoryLoggerFactory());
     await awaitTreeHelper(workerPool, 8, 2);
   });
+
+  describe("a job that throws an error", () => {
+    it("should propogate the error to the root", (done) => {
+      const workerPool = new WorkerPool(1, new MemoryLoggerFactory());
+      workerPool
+        .execute(
+          newLambdaTask("rootTask", async (worker, logger) => {
+            throw new Error("test test test");
+          })
+        )
+        .catch((error) => {
+          done();
+        });
+    });
+  });
+
+  // TODO: test error propagation
 
   it.skip("should be able to run twice", async () => {
     const workerPool = new WorkerPool(10, new MemoryLoggerFactory());
