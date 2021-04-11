@@ -324,8 +324,14 @@ export class Worker {
    * @param tasks list of tasks to block the worker on
    * @returns list of taskresults in the order of the tasks waited on.
    */
-  public async awaitResults<T>(tasks: Task<T>[]): Promise<T[]> {
+  public async awaitResults<T>(
+    tasks: Task<T>[],
+    logger: Logger | null = null
+  ): Promise<T[]> {
     this.curJob.blocked = true;
+    if (logger) {
+      logger.setProgress(0);
+    }
 
     // spawn an additional worker to this one's place while it is blocked.
     this.debug(
@@ -357,7 +363,14 @@ export class Worker {
               oldReject(value);
             };
           }
-          job.callbacks.push(accept);
+          if (logger) {
+            job.callbacks.push((value) => {
+              logger.setProgress(
+                Math.min(100, logger.getProgress() + 100 / tasks.length)
+              );
+              accept(value);
+            });
+          } else job.callbacks.push(accept);
           job.errorCallbacks.push(reject);
         });
       });
@@ -371,7 +384,7 @@ export class Worker {
         "unblocked awaitTasks, killing temp worker and awaiting tmp worker run loop exit."
       );
       this.pool.killWorker(tmpWorker);
-      await tmpWorkerRunPromise;
+      await tmpWorkerRunPromise; // NOTE: we need to re-architect here to not kill a specific worker but just a worker in order to return to operation.
       this.curJob.blocked = false;
       this.debug(
         "awaitResults returning. All results are available and tmp worker has exited."
@@ -393,6 +406,7 @@ export class Worker {
           if (diedFirst || this.killed) {
             this.debug("died first, reenqueueing job");
             this.pool.enqueueJob(job);
+            accept(null);
             return;
           }
           accept(job);

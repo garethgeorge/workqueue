@@ -88,7 +88,7 @@ class WorkQueueVisualizer {
   refresh() {
     const jobToListItem = (job: WorkerJob): string => {
       let jobInfo = `[${job.task.id}] ${job.task.name}`;
-      if (job.logger && job.logger.getProgress()) {
+      if (job.logger && job.logger.getProgress() != null) {
         jobInfo += " - %" + Math.round(job.logger.getProgress() * 10) / 10;
       }
 
@@ -167,12 +167,14 @@ const awaitTreeHelper = async (
     return newLambdaTask(
       "taskDepth: " + treeLevel + " taskNo: " + taskNo,
       async (worker, logger) => {
-        console.log(logger);
-        logger.setProgress(0);
-        while (logger.getProgress() < 100) {
-          logger.setProgress(logger.getProgress() + 1);
-        }
         if (treeLevel === treeDepth) {
+          logger.setProgress(0);
+          while (logger.getProgress() < 100) {
+            logger.setProgress(logger.getProgress() + 10);
+            await new Promise((accept, reject) => {
+              setTimeout(accept, Math.random() * 100);
+            });
+          }
           tasksRun++;
           return 1;
         } else {
@@ -180,7 +182,7 @@ const awaitTreeHelper = async (
           for (let i = 0; i < branchingFactor; ++i) {
             tasks.push(taskGen(treeLevel + 1, i));
           }
-          const results = await worker.awaitResults(tasks);
+          const results = await worker.awaitResults(tasks, logger);
           return results.reduce((prev, next) => {
             return prev + next;
           }, 0);
@@ -190,8 +192,9 @@ const awaitTreeHelper = async (
   };
 
   const result = await workerPool.execute(taskGen(0, 0));
+  console.log(result);
 };
 
 const workerPool = new WorkerPool(4, new MemoryLoggerFactory());
 new WorkQueueVisualizer(workerPool, 50);
-awaitTreeHelper(workerPool, 8, 2);
+awaitTreeHelper(workerPool, 16, 2);

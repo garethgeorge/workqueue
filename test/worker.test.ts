@@ -101,7 +101,7 @@ describe("work pool", () => {
     await awaitTreeHelper(workerPool, 4, 2);
   });
 
-  it.only("should be able to create a really big and complicated tree with many workers", async () => {
+  it("should be able to create a really big and complicated tree with many workers", async () => {
     const workerPool = new WorkerPool(10, new MemoryLoggerFactory());
     await awaitTreeHelper(workerPool, 8, 2);
   });
