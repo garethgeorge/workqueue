@@ -332,7 +332,6 @@ export class Worker {
       });
       return result;
     } catch (e) {
-      console.log("CAUGHT AN ERROR: ", e);
       setImmediate(() => {
         job.logger.writableStream().write("" + e);
         job.onError.emit(e);
