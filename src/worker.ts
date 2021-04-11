@@ -60,12 +60,14 @@ export class WorkerPool {
   private loggerFactory: LoggerFactory;
   private workers: Worker[] = [];
   private workerJobs: { [id: string]: WorkerJob } = {};
+  private rootJob: WorkerJob | null = null;
 
   // only one root task can be executed on a workerpool at a time.
   private executeExclusion: Semaphore = new Semaphore(1);
   private availableJobs: Semaphore = new Semaphore(0);
   private queues: Queue<WorkerJob>[] = [];
   private debug = debug("workqueue:pool");
+  private killWorkerCallbacks: ((worker: Worker) => void)[] = [];
 
   public onDequeueJob = new EventEmitter<WorkerJob>(); // job fetched from queue by worker
   public onEnqueueJob = new EventEmitter<WorkerJob>(); // job added to the queue
@@ -99,13 +101,23 @@ export class WorkerPool {
     return newWorker;
   }
 
-  killWorker(workerToKill: Worker) {
-    workerToKill.kill();
+  async killWorker() {
+    if (this.workers.length - this.killWorkerCallbacks.length < 0) {
+      throw new Error("No workers left to kill.");
+    }
+
+    this.availableJobs.V();
+    const killedWorker = (await new Promise((accept) => {
+      this.killWorkerCallbacks.push(accept);
+    })) as Worker;
+
     this.workers = this.workers.filter((worker) => {
-      return worker != workerToKill;
+      return worker !== killedWorker;
     });
 
-    this.onKillWorker.emit(workerToKill);
+    this.onKillWorker.emit(killedWorker);
+
+    return killedWorker;
   }
 
   // TODO: should we remove the return value from this function?
@@ -121,6 +133,7 @@ export class WorkerPool {
       errorCallbacks: [],
       logger: null,
     };
+    this.rootJob = newRootJob;
     this.workerJobs[newRootJob.task.id] = newRootJob;
     this.queues[0].enqueue(newRootJob);
     this.availableJobs.V(); // increment to indicate a job is available
@@ -141,8 +154,8 @@ export class WorkerPool {
 
       // signal to kill the workers when the root task completes
       for (const worker of this.workers) {
-        this.debug("killing worker: " + worker.id);
-        this.killWorker(worker); // NOTE: O(n) making this loop O(n^2)
+        this.debug("killing a worker");
+        await this.killWorker();
       }
 
       this.availableJobs = new Semaphore(0);
@@ -159,9 +172,14 @@ export class WorkerPool {
         throw new Error("expected queues to be empty at the end of the run");
       }
 
+      this.rootJob = null;
       this.executeExclusion.V();
       this.onDone.emit();
     }
+  }
+
+  getRootJob(): WorkerJob | null {
+    return this.rootJob;
   }
 
   enqueueTask(parentTask: Task<any>, task: Task<any>) {
@@ -220,8 +238,14 @@ export class WorkerPool {
     return this.workerJobs[task.id] || null;
   }
 
-  async getNextJob() {
+  async getNextJob(worker: Worker) {
     await this.availableJobs.P();
+
+    if (this.killWorkerCallbacks.length > 0) {
+      // we awoke to kill a worker.
+      this.killWorkerCallbacks.pop()(worker);
+      return null;
+    }
 
     let queue = this.queues[this.queues.length - 1];
     while (queue.size() === 0 && this.queues.length > 1) {
@@ -268,7 +292,6 @@ export class Worker {
   private curJob: WorkerJob | null = null; // should only ever be set by runJob
   private started: boolean = false; // has this worker been run yet, once set true should never be set back to false
   private killed: boolean = false; // has the worker been killed, once set to true should never be set back to false
-  private onKilled: (() => void) | null; // used to cancel getNextJobOrDeath
 
   constructor(pool: WorkerPool, loggerFactory: LoggerFactory) {
     this.pool = pool;
@@ -337,8 +360,7 @@ export class Worker {
     this.debug(
       "awaitResults spawning an extra worker to maintain currency. This worker will be blocked shortly."
     );
-    const tmpWorker = this.pool.spawnWorker();
-    const tmpWorkerRunPromise = tmpWorker.run();
+    this.pool.spawnWorker().run();
 
     try {
       // wait on the results via callbacks
@@ -379,46 +401,17 @@ export class Worker {
       return (await Promise.all(promises)) as T[];
     } catch (e) {
       console.log("CAUGHT AN EXCEPTION: " + e);
+      throw e;
     } finally {
       this.debug(
         "unblocked awaitTasks, killing temp worker and awaiting tmp worker run loop exit."
       );
-      this.pool.killWorker(tmpWorker);
-      await tmpWorkerRunPromise; // NOTE: we need to re-architect here to not kill a specific worker but just a worker in order to return to operation.
+      await this.pool.killWorker();
       this.curJob.blocked = false;
       this.debug(
         "awaitResults returning. All results are available and tmp worker has exited."
       );
     }
-  }
-
-  /**
-   * Gets next job or returns null if killed before a job becomes avialable
-   */
-  private getNextJobOrDeath(): Promise<WorkerJob | null> {
-    return new Promise((accept, reject) => {
-      let diedFirst = false;
-
-      this.pool
-        .getNextJob()
-        .then((job) => {
-          this.onKilled = null;
-          if (diedFirst || this.killed) {
-            this.debug("died first, reenqueueing job");
-            this.pool.enqueueJob(job);
-            accept(null);
-            return;
-          }
-          accept(job);
-        })
-        .catch(reject);
-
-      this.onKilled = () => {
-        this.debug("killed by kill signal");
-        diedFirst = true;
-        accept(null);
-      };
-    });
   }
 
   async run() {
@@ -427,9 +420,9 @@ export class Worker {
     }
     this.started = true;
 
-    while (!this.killed) {
+    while (true) {
       this.debug("worker " + this.id + " waiting for the next job.");
-      const job = await this.getNextJobOrDeath();
+      const job = await this.pool.getNextJob(this);
       if (!job) {
         if (this.debug.enabled)
           this.debug(
@@ -449,18 +442,6 @@ export class Worker {
       await this.runJob(job);
       if (this.debug.enabled)
         this.debug("worker " + this.id + " finished job: " + job.task.name);
-    }
-  }
-
-  /**
-   * @internal
-   * signals to the worker that it should exit. NEVER CALL DIRECTLY, USE pool.killWorker(worker)
-   */
-  kill() {
-    this.debug("received kill signal.");
-    this.killed = true;
-    if (this.onKilled) {
-      this.onKilled();
     }
   }
 

@@ -46,7 +46,7 @@ class WorkQueueVisualizer {
     label: "Queue",
     top: 0,
     left: 0,
-    width: "30%",
+    width: "50%",
     height: "100%",
     border: "line",
     tags: true,
@@ -86,45 +86,75 @@ class WorkQueueVisualizer {
   }
 
   refresh() {
-    const jobToListItem = (job: WorkerJob): string => {
-      let jobInfo = `[${job.task.id}] ${job.task.name}`;
-      if (job.logger && job.logger.getProgress() != null) {
-        jobInfo += " - %" + Math.round(job.logger.getProgress() * 10) / 10;
-      }
+    try {
+      this.pool.getRootJob();
 
-      switch (job.status) {
-        case JobStatus.RUNNING:
-          if (job.blocked) {
-            return `{yellow-fg}${jobInfo}{/yellow-fg}`;
-          } else {
-            return `{cyan-fg}${jobInfo}{/cyan-fg}`;
+      const jobToListItem = (job: WorkerJob): string => {
+        let jobInfo = `[${job.task.id}] ${job.task.name}`;
+        if (job.logger && job.logger.getProgress() != null) {
+          jobInfo += " - %" + Math.round(job.logger.getProgress() * 10) / 10;
+        }
+
+        switch (job.status) {
+          case JobStatus.RUNNING:
+            if (job.blocked) {
+              return `{yellow-fg}${jobInfo}{/yellow-fg}`;
+            } else {
+              return `{cyan-fg}${jobInfo}{/cyan-fg}`;
+            }
+          case JobStatus.PENDING:
+            return `{grey-fg}${jobInfo}{/grey-fg}`;
+          case JobStatus.DONE:
+            return `{green-fg}${jobInfo}{/green-fg}`;
+        }
+        return "ERROR INVALID JOB STATUS";
+      };
+      const listItems: string[] = ["" + Math.random()];
+
+      // RENDER JOBS FROM THE TREE
+      if (this.pool.getRootJob()) {
+        const walk = (job: WorkerJob) => {
+          if (!job) {
+            return;
           }
-        case JobStatus.PENDING:
-          return `{grey-fg}${jobInfo}{/grey-fg}`;
-        case JobStatus.DONE:
-          return `{green-fg}${jobInfo}{/green-fg}`;
-      }
-      return "ERROR INVALID JOB STATUS";
-    };
-    const listItems: string[] = [];
+          let prefix = "";
+          for (let i = 0; i < job.priority; ++i) {
+            prefix += " ";
+          }
 
-    this.pool.getWorkers().forEach((worker) => {
-      const job = worker.getRunningJob();
-      if (job) {
+          listItems.push(prefix + jobToListItem(job));
+          for (const child of job.children) {
+            walk(this.pool.getJobForTask(child));
+          }
+        };
+
+        walk(this.pool.getRootJob());
+      }
+
+      /*
+      // RENDER JOBS FROM THE QUEUE
+      this.pool.getWorkers().forEach((worker) => {
+        const job = worker.getRunningJob();
+        if (job) {
+          listItems.push(jobToListItem(job));
+        }
+      });
+
+      this.pool.getQueuedJobs().forEach((job) => {
         listItems.push(jobToListItem(job));
+      });
+      */
+
+      if (this.queueList.getScroll() >= listItems.length) {
+        this.queueList.setScroll(listItems.length - 1);
       }
-    });
 
-    this.pool.getQueuedJobs().forEach((job) => {
-      listItems.push(jobToListItem(job));
-    });
-
-    if (this.queueList.getScroll() >= listItems.length) {
-      this.queueList.setScroll(listItems.length - 1);
+      this.queueList.setItems(listItems as any[]);
+      this.queueList.screen.render();
+    } catch (e) {
+      this.screen.destroy();
+      console.error(e);
     }
-
-    this.queueList.setItems(listItems as any[]);
-    this.screen.render();
   }
 }
 
@@ -178,6 +208,9 @@ const awaitTreeHelper = async (
           tasksRun++;
           return 1;
         } else {
+          await new Promise((accept) => {
+            setTimeout(accept, 200);
+          });
           let tasks: Task<number>[] = [];
           for (let i = 0; i < branchingFactor; ++i) {
             tasks.push(taskGen(treeLevel + 1, i));
@@ -196,5 +229,5 @@ const awaitTreeHelper = async (
 };
 
 const workerPool = new WorkerPool(4, new MemoryLoggerFactory());
-new WorkQueueVisualizer(workerPool, 50);
+new WorkQueueVisualizer(workerPool, 100);
 awaitTreeHelper(workerPool, 16, 2);
