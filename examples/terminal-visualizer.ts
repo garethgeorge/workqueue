@@ -1,6 +1,6 @@
 import { MemoryLoggerFactory } from "../src/logger";
 import { newLambdaTask, Task, WorkerPool } from "../src/worker";
-import TerminalVisualizer from "../src/terminal";
+import {TerminalVisualizer} from "../src/";
 
 const awaitTreeHelper = async (
   workerPool: WorkerPool,

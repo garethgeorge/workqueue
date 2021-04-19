@@ -12,3 +12,4 @@ export {
   MemoryLogger,
   MemoryLoggerFactory,
 } from "./logger";
+export {default as TerminalVisualizer} from "./terminal";
