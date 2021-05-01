@@ -115,6 +115,7 @@ export default class WorkQueueVisualizer {
   }
 
   refresh() {
+    if (!this.screen) return;
     try {
       this.pool.getRootJob();
 
@@ -165,6 +166,10 @@ export default class WorkQueueVisualizer {
       console.error(e);
     }
   }
+
+  destroy() {
+    this.screen.destroy();
+  }
 }
 
 class JobLogVisualizer {
@@ -188,7 +193,6 @@ class JobLogVisualizer {
 
     this.onUpdateListener = job.onUpdate.listen(() => {
       this.box.setLabel(jobToListItem(job));
-      this.box.render();
     });
 
     const onComplete = () => {

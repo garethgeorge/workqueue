@@ -1,4 +1,3 @@
-import StreamCache from "stream-cache";
 import stream from "stream";
 
 declare interface Task<T> {}

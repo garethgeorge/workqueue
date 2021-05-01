@@ -7,34 +7,18 @@ const awaitTreeHelper = async (
   treeDepth: number,
   branchingFactor: number
 ) => {
-  let tasksRun = 0;
-
   const taskGen = (treeLevel: number, taskNo: number) => {
     return newLambdaTask(
       "taskDepth: " + treeLevel + " taskNo: " + taskNo,
       async (worker, logger) => {
+        await new Promise((accept) => {
+          setImmediate(accept);
+        });
+
         if (treeLevel === treeDepth) {
           logger.setProgress(0);
-          while (logger.getProgress() < 100) {
-            logger.setProgress(logger.getProgress() + 10);
-            await new Promise((accept, reject) => {
-              setTimeout(accept, Math.random() * 100);
-            });
-            logger
-              .writableStream()
-              .write(
-                "Progress at " +
-                  logger.getProgress() +
-                  " on worker " +
-                  worker.id
-              );
-          }
-          tasksRun++;
-          return 1;
+          throw new Error("FAILURE");
         } else {
-          await new Promise((accept) => {
-            setTimeout(accept, 200);
-          });
           let tasks: Task<number>[] = [];
           for (let i = 0; i < branchingFactor; ++i) {
             tasks.push(taskGen(treeLevel + 1, i));
@@ -48,10 +32,18 @@ const awaitTreeHelper = async (
     );
   };
 
-  const result = await workerPool.execute(taskGen(0, 0));
-  console.log(result);
+  workerPool.execute(taskGen(0, 0)).catch((e) => {
+    console.log("CAUGHT AN ERROR HERE: " + e.toString());
+  });
 };
 
-const workerPool = new WorkerPool(4, new MemoryLoggerFactory());
-new TerminalVisualizer(workerPool, 100);
-awaitTreeHelper(workerPool, 8, 5);
+(async () => {
+  const workerPool = new WorkerPool(4, new MemoryLoggerFactory());
+  // let termViz = new TerminalVisualizer(workerPool, 100);
+  try {
+    await awaitTreeHelper(workerPool, 4, 2);
+  } catch (e) {
+    console.log("FOOBAR: " + e);
+    process.exit(2);
+  }
+})();

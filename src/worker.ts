@@ -81,7 +81,7 @@ export class WorkerPool {
     this.loggerFactory = loggerFactory;
 
     for (let i = 0; i < numWorkers; ++i) {
-      this.spawnWorker();
+      this.spawnWorker().run();
     }
     // push the initial queue, there is always at least one
     this.queues.push(new Queue());
@@ -107,14 +107,16 @@ export class WorkerPool {
       throw new Error("No workers left to kill.");
     }
 
-    this.availableJobs.V();
     const killedWorker = (await new Promise((accept) => {
       this.killWorkerCallbacks.push(accept);
+      this.availableJobs.V();
     })) as Worker;
 
-    this.workers = this.workers.filter((worker) => {
-      return worker !== killedWorker;
-    });
+    let killedWorkerIdx = this.workers.indexOf(killedWorker);
+    if (killedWorkerIdx === -1) {
+      throw new Error("killed worker not found in this.worker");
+    }
+    this.workers.splice(killedWorkerIdx, 1);
 
     this.onKillWorker.emit(killedWorker);
 
@@ -140,43 +142,40 @@ export class WorkerPool {
     this.queues[0].enqueue(newRootJob);
     this.availableJobs.V(); // increment to indicate a job is available
 
-    const workersCompleted = [];
-    for (const worker of this.workers) {
-      workersCompleted.push(worker.run());
-    }
-
     try {
       this.debug("pool.execute awaiting result of root task");
       return await new Promise((accept, reject) => {
-        newRootJob.onResult.listen(accept);
-        newRootJob.onError.listen(reject);
+        newRootJob.onResult.listen((result) => {
+          accept(result);
+        });
+        newRootJob.onError.listen((error) => {
+          reject(error);
+        });
       });
-    } finally {
-      this.debug("pool has detected that the root task exited.");
-
-      // signal to kill the workers when the root task completes
-      for (const worker of this.workers) {
-        this.debug("killing a worker");
-        await this.killWorker();
-      }
-
-      this.availableJobs = new Semaphore(0);
-
-      this.debug("waiting for all workers to exit.");
-      await Promise.all(workersCompleted);
-
-      if (
-        this.getQueuedJobs().length !== 0 ||
-        Object.values(this.workerJobs).length !== 0
-      ) {
-        console.log(this.queues[0].size());
-        console.log(this.workerJobs);
-        throw new Error("expected queues to be empty at the end of the run");
-      }
-
+    } catch (e) {
       this.rootJob = null;
-      this.executeExclusion.V();
-      this.onDone.emit();
+      throw e;
+    } finally {
+      setImmediate(async () => {
+        this.debug("pool has detected that the root task exited.");
+
+        // signal to kill the workers when the root task completes
+        while (this.workers.length > 0) {
+          this.debug("killing a worker");
+          await this.killWorker();
+        }
+
+        if (
+          this.getQueuedJobs().length !== 0 ||
+          Object.values(this.workerJobs).length !== 0
+        ) {
+          throw new Error("expected queues to be empty at the end of the run");
+        }
+
+        this.rootJob = null;
+        this.executeExclusion.V();
+        this.onDone.emit();
+      });
     }
   }
 
@@ -315,9 +314,6 @@ export class Worker {
    */
   private async runJob(job: WorkerJob) {
     if (this.debug.enabled) this.debug("started job: " + job.task.name);
-    await new Promise((accept) => {
-      setImmediate(accept);
-    });
 
     try {
       this.curJob = job;
@@ -330,7 +326,6 @@ export class Worker {
       setImmediate(() => {
         job.onResult.emit(result);
       });
-      return result;
     } catch (e) {
       setImmediate(() => {
         job.logger.writableStream().write("" + e);
@@ -378,35 +373,13 @@ export class Worker {
 
         // create a callback awaiting the completion of the job.
         return new Promise((accept, reject) => {
-          if (this.debug) {
-            let oldAccept = accept;
-            let oldReject = reject;
-            accept = (value) => {
-              this.debug("task " + task.name + " provided results.");
-              oldAccept(value);
-            };
-            reject = (value) => {
-              this.debug("task " + task.name + " errored.");
-              oldReject(value);
-            };
-          }
-          if (logger) {
-            job.onResult.listen((value) => {
-              logger.setProgress(
-                Math.min(100, logger.getProgress() + 100 / tasks.length)
-              );
-              accept(value);
-            });
-          } else job.onResult.listen(accept);
+          job.onResult.listen(accept);
           job.onError.listen(reject);
         });
       });
 
       this.debug("running awaitResults on " + tasks.length + " tasks.");
       return (await Promise.all(promises)) as T[];
-    } catch (e) {
-      console.log("CAUGHT AN EXCEPTION: " + e);
-      throw e;
     } finally {
       this.debug(
         "unblocked awaitTasks, killing temp worker and awaiting tmp worker run loop exit."
